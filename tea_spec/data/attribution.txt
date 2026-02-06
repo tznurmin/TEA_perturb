@@ -1,0 +1,7 @@
+Attribution for speclist.txt
+
+Original source by the UniProt Consortium: https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/complete/docs/speclist.txt
+Release: 2025_03 of 18-Jun-2025
+
+Distributed under the Creative Commons Attribution 4.0 License (CC BY 4.0).
+For license details, visit: https://creativecommons.org/licenses/by/4.0/
