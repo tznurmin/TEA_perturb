@@ -1,3 +1,17 @@
+# Copyright 2026 tznurmin
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import argparse
@@ -12,9 +26,11 @@ from typing import Dict, List, Sequence, Tuple
 import numpy as np
 from scipy.stats import spearmanr
 
+from io_utils import slugify_model_id
+
 # delta is shift(species substitution) minus shift(control baseline)
 # FULL and ABBR are full and abbreviated binomial replacements
-# fold is (baseline + delta)/baseline
+# fold is (baseline + delta) / baseline
 # ABBR fold uses the FULL baseline, because ABBR deltas are computed against the left species' FULL baseline
 # SNR is a signal-to-noise ratio across species
 
@@ -88,12 +104,11 @@ def _spearman(a: Sequence[float], b: Sequence[float]) -> float:
     return float(rho)
 
 
-def _detect_seeds(workdir: Path) -> List[int]:
-    base = workdir / "summaries_from_cache"
-    if not base.exists():
-        return []
+def _detect_seeds_under(summaries_root: Path) -> List[int]:
     out: List[int] = []
-    for p in base.iterdir():
+    if not summaries_root.exists():
+        return out
+    for p in summaries_root.iterdir():
         m = re.fullmatch(r"seed(\d+)", p.name)
         if m and p.is_dir():
             out.append(int(m.group(1)))
@@ -157,6 +172,68 @@ def _fold(delta: float, baseline: float) -> float:
     return 1.0 + (delta / baseline)
 
 
+def _score_candidate_root(
+    root: Path, seeds: Sequence[int], methods: Sequence[str]
+) -> Tuple[int, float]:
+    count = 0
+    newest = 0.0
+    for seed in seeds:
+        for method in methods:
+            p = root / f"seed{seed}" / method / "minimal_summary.csv"
+            if p.exists():
+                count += 1
+                try:
+                    newest = max(newest, p.stat().st_mtime)
+                except Exception:
+                    pass
+    return count, newest
+
+
+def _auto_pick_summaries_root(
+    workdir: Path, seeds: Sequence[int], methods: Sequence[str]
+) -> Path:
+    base = workdir / "summaries_from_cache"
+    if not base.exists():
+        return base
+
+    candidates: Dict[Path, int] = {}
+
+    # Any minimal_summary.csv implies a root at parents[2]:
+    # <root>/seed42/<method>/minimal_summary.csv
+    for f in base.rglob("minimal_summary.csv"):
+        try:
+            root = f.parents[2]
+        except Exception:
+            continue
+        candidates[root] = candidates.get(root, 0) + 1
+
+    if not candidates:
+        return base
+
+    if seeds:
+        scored = [(root, *_score_candidate_root(root, seeds, methods)) for root in candidates]
+        scored.sort(key=lambda t: (t[1], t[2]), reverse=True)
+        best_root, best_count, _ = scored[0]
+        return best_root if best_count > 0 else base
+
+    # No seeds specified: pick the root with most files, then newest.
+    scored2 = []
+    for root, nfiles in candidates.items():
+        newest = 0.0
+        try:
+            for f in root.rglob("minimal_summary.csv"):
+                newest = max(newest, f.stat().st_mtime)
+        except Exception:
+            pass
+        scored2.append((root, nfiles, newest))
+    scored2.sort(key=lambda t: (t[1], t[2]), reverse=True)
+    return scored2[0][0]
+
+
+def _model_to_dirname(model_id: str) -> str:
+    return slugify_model_id(model_id)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--workdir", default="work")
@@ -164,30 +241,48 @@ def main() -> None:
     ap.add_argument("--methods", default="none,abtt,whiten")
     ap.add_argument("--baselines", default="synonym,random")
     ap.add_argument("--metric", default="one_minus_cos")
+    ap.add_argument("--no-folds", action="store_true", help="Do not print fold columns.")
     ap.add_argument(
-        "--no-folds", action="store_true", help="Do not print fold columns."
+        "--summaries-root",
+        default="",
+        help="Override summaries root. Expected layout: <root>/seed42/<method>/minimal_summary.csv",
+    )
+    ap.add_argument(
+        "--model",
+        default="",
+        help="Model id used in the run; maps through the same filesystem-safe slug used by the pipeline.",
     )
     args = ap.parse_args()
 
     workdir = Path(args.workdir)
-    seeds = (
-        [int(s) for s in args.seeds.split(",") if s.strip()]
-        if args.seeds
-        else _detect_seeds(workdir)
-    )
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
     baselines = [b.strip() for b in args.baselines.split(",") if b.strip()]
     metric = args.metric
     show_folds = not args.no_folds
 
-    base = workdir / "summaries_from_cache"
+    seeds = [int(s) for s in args.seeds.split(",") if s.strip()] if args.seeds else []
+
+    if args.summaries_root.strip():
+        summaries_root = Path(args.summaries_root)
+    elif args.model.strip():
+        summaries_root = (
+            workdir
+            / "summaries_from_cache"
+            / "models"
+            / _model_to_dirname(args.model)
+        )
+    else:
+        summaries_root = _auto_pick_summaries_root(workdir, seeds, methods)
+
+    if not seeds:
+        seeds = _detect_seeds_under(summaries_root)
 
     per_delta: Dict[Tuple[int, str, str, bool], Dict[str, Row]] = {}
     per_base: Dict[Tuple[int, str, str, bool], Dict[str, Row]] = {}
 
     for seed in seeds:
         for method in methods:
-            csv_path = base / f"seed{seed}" / method / "minimal_summary.csv"
+            csv_path = summaries_root / f"seed{seed}" / method / "minimal_summary.csv"
             if not csv_path.exists():
                 continue
             for baseline in baselines:
@@ -204,11 +299,10 @@ def main() -> None:
     print(f"METHODS: {','.join(methods)}")
     print(f"BASELINES: {','.join(baselines)}")
     print(f"METRIC: {metric}")
+    print(f"SUMMARIES_ROOT: {summaries_root}")
     print("delta is species-substitution shift minus baseline-perturbation shift.")
     if show_folds:
-        print(
-            "fold is (baseline + delta) / baseline; ABBR fold uses the FULL baseline."
-        )
+        print("fold is (baseline + delta) / baseline; ABBR fold uses the FULL baseline.")
     print()
 
     for baseline in baselines:

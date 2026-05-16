@@ -1,3 +1,17 @@
+# Copyright 2026 tznurmin
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import argparse
@@ -255,9 +269,9 @@ def write_name_list(path: str, names: Sequence[str]) -> None:
 
 
 def build_cli(argv: Optional[List[str]] = None) -> int:
-    base_dir = Path(__file__).resolve().parent.parent
-    default_speclist = base_dir / "data" / "speclist.txt"
-    default_out = base_dir / "work" / "species" / "all_species.txt"
+    repo_root = Path(__file__).resolve().parents[2]
+    default_speclist = repo_root / "tea_spec" / "data" / "speclist.txt"
+    default_out = repo_root / "work" / "species" / "all_species.txt"
 
     ap = argparse.ArgumentParser(
         description="Extract a species list from UniProt speclist.txt"

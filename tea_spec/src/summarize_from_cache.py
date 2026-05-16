@@ -1,11 +1,27 @@
+# Copyright 2026 tznurmin
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import argparse
 import csv
 import json
+import multiprocessing as mp
 import os
+import tempfile
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -89,6 +105,592 @@ def _init_delta_accumulators(S: int):
         }
         for i in range(S)
     }
+
+
+_CSV_HEADER = [
+    "anchor",
+    "n_sentences",
+    "n_targets",
+    "condition",
+    "stat",
+    "mean",
+    "ci_lo",
+    "ci_hi",
+    "n",
+    "reanchored_from",
+]
+
+
+def _cat(parts: List[np.ndarray]) -> np.ndarray:
+    return np.concatenate(parts, axis=0) if parts else np.array([])
+
+
+def _csv_row(
+    anchor: str, n_sentences: int, n_targets: int, cond: str, stat_name: str, stat_obj: dict
+) -> List[Any]:
+    return [
+        anchor,
+        int(n_sentences),
+        int(n_targets),
+        cond,
+        stat_name,
+        stat_obj["mean"],
+        stat_obj["ci95"][0],
+        stat_obj["ci95"][1],
+        stat_obj["n"],
+        "",
+    ]
+
+
+def _summary_filename(species_name: str) -> str:
+    return f"summary_{species_name.lower().replace(' ', '_')}.json"
+
+
+def _species_summary_from_stats(
+    anchor: str,
+    n_sentences: int,
+    n_targets: int,
+    stats: dict,
+    have_rand: bool,
+) -> Tuple[List[List[Any]], dict]:
+    rows = [
+        _csv_row(
+            anchor,
+            n_sentences,
+            n_targets,
+            "synonym_full",
+            "one_minus_cos",
+            stats["syn_full"]["one_minus_cos"],
+        ),
+        _csv_row(
+            anchor,
+            n_sentences,
+            n_targets,
+            "synonym_full",
+            "unit_L2",
+            stats["syn_full"]["unit_L2"],
+        ),
+        _csv_row(
+            anchor,
+            n_sentences,
+            n_targets,
+            "synonym_abbrev",
+            "one_minus_cos",
+            stats["syn_abbrev"]["one_minus_cos"],
+        ),
+        _csv_row(
+            anchor,
+            n_sentences,
+            n_targets,
+            "synonym_abbrev",
+            "unit_L2",
+            stats["syn_abbrev"]["unit_L2"],
+        ),
+    ]
+
+    if have_rand:
+        rows += [
+            _csv_row(
+                anchor,
+                n_sentences,
+                n_targets,
+                "random_full",
+                "one_minus_cos",
+                stats["rand_full"]["one_minus_cos"],
+            ),
+            _csv_row(
+                anchor,
+                n_sentences,
+                n_targets,
+                "random_full",
+                "unit_L2",
+                stats["rand_full"]["unit_L2"],
+            ),
+            _csv_row(
+                anchor,
+                n_sentences,
+                n_targets,
+                "random_abbrev",
+                "one_minus_cos",
+                stats["rand_abbrev"]["one_minus_cos"],
+            ),
+            _csv_row(
+                anchor,
+                n_sentences,
+                n_targets,
+                "random_abbrev",
+                "unit_L2",
+                stats["rand_abbrev"]["unit_L2"],
+            ),
+        ]
+
+    rows += [
+        _csv_row(
+            anchor,
+            n_sentences,
+            n_targets,
+            "species_full_delta_vs_syn",
+            "one_minus_cos",
+            stats["full_1_syn"],
+        ),
+        _csv_row(
+            anchor,
+            n_sentences,
+            n_targets,
+            "species_full_delta_vs_syn",
+            "unit_L2",
+            stats["full_2_syn"],
+        ),
+        _csv_row(
+            anchor,
+            n_sentences,
+            n_targets,
+            "species_abbrev_delta_vs_syn",
+            "one_minus_cos",
+            stats["abbr_1_syn"],
+        ),
+        _csv_row(
+            anchor,
+            n_sentences,
+            n_targets,
+            "species_abbrev_delta_vs_syn",
+            "unit_L2",
+            stats["abbr_2_syn"],
+        ),
+    ]
+
+    if have_rand:
+        rows += [
+            _csv_row(
+                anchor,
+                n_sentences,
+                n_targets,
+                "species_full_delta_vs_rand",
+                "one_minus_cos",
+                stats["full_1_rand"],
+            ),
+            _csv_row(
+                anchor,
+                n_sentences,
+                n_targets,
+                "species_full_delta_vs_rand",
+                "unit_L2",
+                stats["full_2_rand"],
+            ),
+            _csv_row(
+                anchor,
+                n_sentences,
+                n_targets,
+                "species_abbrev_delta_vs_rand",
+                "one_minus_cos",
+                stats["abbr_1_rand"],
+            ),
+            _csv_row(
+                anchor,
+                n_sentences,
+                n_targets,
+                "species_abbrev_delta_vs_rand",
+                "unit_L2",
+                stats["abbr_2_rand"],
+            ),
+        ]
+
+    payload = {
+        "_meta": {
+            "anchor": anchor,
+            "n_sentences": int(n_sentences),
+            "n_targets": int(n_targets),
+        },
+        "synonym_full": {
+            "one_minus_cos": stats["syn_full"]["one_minus_cos"],
+            "unit_L2": stats["syn_full"]["unit_L2"],
+        },
+        "synonym_abbrev": {
+            "one_minus_cos": stats["syn_abbrev"]["one_minus_cos"],
+            "unit_L2": stats["syn_abbrev"]["unit_L2"],
+        },
+        "species_full": {
+            "delta_vs_syn": {
+                "one_minus_cos": stats["full_1_syn"],
+                "unit_L2": stats["full_2_syn"],
+            }
+        },
+        "species_abbrev": {
+            "delta_vs_syn": {
+                "one_minus_cos": stats["abbr_1_syn"],
+                "unit_L2": stats["abbr_2_syn"],
+            }
+        },
+    }
+
+    if have_rand:
+        payload.update(
+            {
+                "random_full": {
+                    "one_minus_cos": stats["rand_full"]["one_minus_cos"],
+                    "unit_L2": stats["rand_full"]["unit_L2"],
+                },
+                "random_abbrev": {
+                    "one_minus_cos": stats["rand_abbrev"]["one_minus_cos"],
+                    "unit_L2": stats["rand_abbrev"]["unit_L2"],
+                },
+            }
+        )
+        payload["species_full"]["delta_vs_rand"] = {
+            "one_minus_cos": stats["full_1_rand"],
+            "unit_L2": stats["full_2_rand"],
+        }
+        payload["species_abbrev"]["delta_vs_rand"] = {
+            "one_minus_cos": stats["abbr_1_rand"],
+            "unit_L2": stats["abbr_2_rand"],
+        }
+
+    return rows, payload
+
+
+def _compute_species_result(
+    i: int,
+    z_full: np.ndarray,
+    z_abbr: np.ndarray,
+    z_syn_full: np.ndarray,
+    z_syn_abbr: np.ndarray,
+    species: List[str],
+    bootstrap: int,
+    ci: float,
+    syn_ok_full: Optional[np.ndarray] = None,
+    syn_ok_abbr: Optional[np.ndarray] = None,
+    z_rand_full: Optional[np.ndarray] = None,
+    z_rand_abbr: Optional[np.ndarray] = None,
+    rand_ok_full: Optional[np.ndarray] = None,
+    rand_ok_abbr: Optional[np.ndarray] = None,
+) -> Tuple[int, List[List[Any]], str, dict]:
+    S, N, _D = z_full.shape
+    have_rand = z_rand_full is not None and z_rand_abbr is not None
+
+    ok_f = syn_ok_full[i] if syn_ok_full is not None else None
+    ok_a = syn_ok_abbr[i] if syn_ok_abbr is not None else None
+
+    syn_omc_v, syn_l2_v, syn_base_omc, syn_base_l2 = _baseline_arrays(
+        z_full[i], z_syn_full[i], ok_f
+    )
+    syn_abbr_omc_v, syn_abbr_l2_v, _syn_abbr_omc, _syn_abbr_l2 = _baseline_arrays(
+        z_abbr[i], z_syn_abbr[i], ok_a
+    )
+    syn_mask = np.isfinite(syn_base_omc)
+
+    if have_rand:
+        assert z_rand_full is not None and z_rand_abbr is not None
+        ok_rf = rand_ok_full[i] if rand_ok_full is not None else None
+        ok_ra = rand_ok_abbr[i] if rand_ok_abbr is not None else None
+        rand_omc_v, rand_l2_v, rand_base_omc, rand_base_l2 = _baseline_arrays(
+            z_full[i], z_rand_full[i], ok_rf
+        )
+        rand_abbr_omc_v, rand_abbr_l2_v, _rand_abbr_omc, _rand_abbr_l2 = (
+            _baseline_arrays(z_abbr[i], z_rand_abbr[i], ok_ra)
+        )
+        rand_mask = np.isfinite(rand_base_omc)
+    else:
+        rand_omc_v = rand_l2_v = rand_abbr_omc_v = rand_abbr_l2_v = None
+        rand_base_omc = rand_base_l2 = rand_mask = None
+
+    Zi = _torch(z_full[i])
+    full_1_syn_parts: List[np.ndarray] = []
+    full_2_syn_parts: List[np.ndarray] = []
+    abbr_1_syn_parts: List[np.ndarray] = []
+    abbr_2_syn_parts: List[np.ndarray] = []
+    full_1_rand_parts: List[np.ndarray] = []
+    full_2_rand_parts: List[np.ndarray] = []
+    abbr_1_rand_parts: List[np.ndarray] = []
+    abbr_2_rand_parts: List[np.ndarray] = []
+
+    # Preserve the historical per-species target order:
+    # full targets 0..i-1 use the old pair orientation (target, anchor),
+    # then targets i+1..S-1 use (anchor, target).
+    for j in range(i):
+        Zj = _torch(z_full[j])
+        cos, l2 = pairwise_compare(Zj, Zi)
+        omc = 1.0 - _as_np(cos)
+        l2n = _as_np(l2)
+        full_1_syn_parts.append((omc - syn_base_omc)[syn_mask])
+        full_2_syn_parts.append((l2n - syn_base_l2)[syn_mask])
+        if have_rand:
+            assert rand_base_omc is not None
+            assert rand_base_l2 is not None
+            assert rand_mask is not None
+            full_1_rand_parts.append((omc - rand_base_omc)[rand_mask])
+            full_2_rand_parts.append((l2n - rand_base_l2)[rand_mask])
+
+    for j in range(i + 1, S):
+        Zj = _torch(z_full[j])
+        cos, l2 = pairwise_compare(Zi, Zj)
+        omc = 1.0 - _as_np(cos)
+        l2n = _as_np(l2)
+        full_1_syn_parts.append((omc - syn_base_omc)[syn_mask])
+        full_2_syn_parts.append((l2n - syn_base_l2)[syn_mask])
+        if have_rand:
+            assert rand_base_omc is not None
+            assert rand_base_l2 is not None
+            assert rand_mask is not None
+            full_1_rand_parts.append((omc - rand_base_omc)[rand_mask])
+            full_2_rand_parts.append((l2n - rand_base_l2)[rand_mask])
+
+    for j in range(S):
+        if i == j:
+            continue
+        ZjA = _torch(z_abbr[j])
+        cos, l2 = pairwise_compare(Zi, ZjA)
+        omc = 1.0 - _as_np(cos)
+        l2n = _as_np(l2)
+        abbr_1_syn_parts.append((omc - syn_base_omc)[syn_mask])
+        abbr_2_syn_parts.append((l2n - syn_base_l2)[syn_mask])
+        if have_rand:
+            assert rand_base_omc is not None
+            assert rand_base_l2 is not None
+            assert rand_mask is not None
+            abbr_1_rand_parts.append((omc - rand_base_omc)[rand_mask])
+            abbr_2_rand_parts.append((l2n - rand_base_l2)[rand_mask])
+
+    full_1_syn = _cat(full_1_syn_parts)
+    full_2_syn = _cat(full_2_syn_parts)
+    abbr_1_syn = _cat(abbr_1_syn_parts)
+    abbr_2_syn = _cat(abbr_2_syn_parts)
+
+    stats = {
+        "syn_full": {
+            "one_minus_cos": summarize(syn_omc_v, n_boot=bootstrap, level=ci),
+            "unit_L2": summarize(syn_l2_v, n_boot=bootstrap, level=ci),
+        },
+        "syn_abbrev": {
+            "one_minus_cos": summarize(syn_abbr_omc_v, n_boot=bootstrap, level=ci),
+            "unit_L2": summarize(syn_abbr_l2_v, n_boot=bootstrap, level=ci),
+        },
+        "full_1_syn": summarize(full_1_syn, n_boot=bootstrap, level=ci),
+        "full_2_syn": summarize(full_2_syn, n_boot=bootstrap, level=ci),
+        "abbr_1_syn": summarize(abbr_1_syn, n_boot=bootstrap, level=ci),
+        "abbr_2_syn": summarize(abbr_2_syn, n_boot=bootstrap, level=ci),
+    }
+
+    if have_rand:
+        stats.update(
+            {
+                "rand_full": {
+                    "one_minus_cos": summarize(
+                        rand_omc_v, n_boot=bootstrap, level=ci
+                    ),
+                    "unit_L2": summarize(rand_l2_v, n_boot=bootstrap, level=ci),
+                },
+                "rand_abbrev": {
+                    "one_minus_cos": summarize(
+                        rand_abbr_omc_v, n_boot=bootstrap, level=ci
+                    ),
+                    "unit_L2": summarize(rand_abbr_l2_v, n_boot=bootstrap, level=ci),
+                },
+                "full_1_rand": summarize(
+                    _cat(full_1_rand_parts), n_boot=bootstrap, level=ci
+                ),
+                "full_2_rand": summarize(
+                    _cat(full_2_rand_parts), n_boot=bootstrap, level=ci
+                ),
+                "abbr_1_rand": summarize(
+                    _cat(abbr_1_rand_parts), n_boot=bootstrap, level=ci
+                ),
+                "abbr_2_rand": summarize(
+                    _cat(abbr_2_rand_parts), n_boot=bootstrap, level=ci
+                ),
+            }
+        )
+
+    rows, payload = _species_summary_from_stats(
+        anchor=species[i],
+        n_sentences=N,
+        n_targets=len(species) - 1,
+        stats=stats,
+        have_rand=have_rand,
+    )
+    return i, rows, _summary_filename(species[i]), payload
+
+
+_SPAWN_DATA: dict[str, Any] = {}
+
+
+def _save_parallel_inputs(
+    tmpdir: Path,
+    z_full: np.ndarray,
+    z_abbr: np.ndarray,
+    z_syn_full: np.ndarray,
+    z_syn_abbr: np.ndarray,
+    syn_ok_full: Optional[np.ndarray],
+    syn_ok_abbr: Optional[np.ndarray],
+    z_rand_full: Optional[np.ndarray],
+    z_rand_abbr: Optional[np.ndarray],
+    rand_ok_full: Optional[np.ndarray],
+    rand_ok_abbr: Optional[np.ndarray],
+) -> dict[str, Optional[str]]:
+    arrays = {
+        "z_full": z_full,
+        "z_abbr": z_abbr,
+        "z_syn_full": z_syn_full,
+        "z_syn_abbr": z_syn_abbr,
+        "syn_ok_full": syn_ok_full,
+        "syn_ok_abbr": syn_ok_abbr,
+        "z_rand_full": z_rand_full,
+        "z_rand_abbr": z_rand_abbr,
+        "rand_ok_full": rand_ok_full,
+        "rand_ok_abbr": rand_ok_abbr,
+    }
+
+    paths: dict[str, Optional[str]] = {}
+    for name, arr in arrays.items():
+        if arr is None:
+            paths[name] = None
+            continue
+        path = tmpdir / f"{name}.npy"
+        np.save(path, arr, allow_pickle=False)
+        paths[name] = str(path)
+    return paths
+
+
+def _load_memmap(path: Optional[str]) -> Optional[np.ndarray]:
+    return np.load(path, mmap_mode="c") if path is not None else None
+
+
+def _set_single_thread_worker_env() -> None:
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+    os.environ.setdefault("TORCH_NUM_THREADS", "1")
+
+
+def _init_spawn_worker(
+    array_paths: dict[str, Optional[str]],
+    species: List[str],
+    bootstrap: int,
+    ci: float,
+) -> None:
+    _set_single_thread_worker_env()
+    try:
+        torch.set_num_threads(1)
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
+
+    _SPAWN_DATA.clear()
+    _SPAWN_DATA.update(
+        {
+            "z_full": _load_memmap(array_paths["z_full"]),
+            "z_abbr": _load_memmap(array_paths["z_abbr"]),
+            "z_syn_full": _load_memmap(array_paths["z_syn_full"]),
+            "z_syn_abbr": _load_memmap(array_paths["z_syn_abbr"]),
+            "species": species,
+            "bootstrap": bootstrap,
+            "ci": ci,
+            "syn_ok_full": _load_memmap(array_paths["syn_ok_full"]),
+            "syn_ok_abbr": _load_memmap(array_paths["syn_ok_abbr"]),
+            "z_rand_full": _load_memmap(array_paths["z_rand_full"]),
+            "z_rand_abbr": _load_memmap(array_paths["z_rand_abbr"]),
+            "rand_ok_full": _load_memmap(array_paths["rand_ok_full"]),
+            "rand_ok_abbr": _load_memmap(array_paths["rand_ok_abbr"]),
+        }
+    )
+
+
+def _compute_species_result_from_spawn_worker(
+    i: int,
+) -> Tuple[int, List[List[Any]], str, dict]:
+    return _compute_species_result(i=i, **_SPAWN_DATA)
+
+
+def _write_parallel_results(out_dir: str, iterator, expected_count: int) -> None:
+    csv_path = os.path.join(out_dir, "minimal_summary.csv")
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(_CSV_HEADER)
+        for expected_i, (i, rows, json_name, payload) in enumerate(iterator):
+            if i != expected_i:
+                raise RuntimeError(f"parallel result order mismatch: got {i}, expected {expected_i}")
+            w.writerows(rows)
+            with open(os.path.join(out_dir, json_name), "w", encoding="utf-8") as jf:
+                json.dump(payload, jf, ensure_ascii=False, indent=2)
+
+    if expected_count == 0:
+        raise RuntimeError("no species were summarized")
+    print(f"[SAVE] {csv_path}")
+
+
+def _compute_stats_parallel(
+    z_full: np.ndarray,
+    z_abbr: np.ndarray,
+    z_syn_full: np.ndarray,
+    z_syn_abbr: np.ndarray,
+    out_dir: str,
+    species: List[str],
+    bootstrap: int,
+    ci: float,
+    workers: int,
+    syn_ok_full: Optional[np.ndarray] = None,
+    syn_ok_abbr: Optional[np.ndarray] = None,
+    z_rand_full: Optional[np.ndarray] = None,
+    z_rand_abbr: Optional[np.ndarray] = None,
+    rand_ok_full: Optional[np.ndarray] = None,
+    rand_ok_abbr: Optional[np.ndarray] = None,
+) -> None:
+    os.makedirs(out_dir, exist_ok=True)
+    S = z_full.shape[0]
+    workers = max(1, min(int(workers), S))
+
+    if workers == 1:
+        iterator = (
+            _compute_species_result(
+                i,
+                z_full,
+                z_abbr,
+                z_syn_full,
+                z_syn_abbr,
+                species,
+                bootstrap,
+                ci,
+                syn_ok_full=syn_ok_full,
+                syn_ok_abbr=syn_ok_abbr,
+                z_rand_full=z_rand_full,
+                z_rand_abbr=z_rand_abbr,
+                rand_ok_full=rand_ok_full,
+                rand_ok_abbr=rand_ok_abbr,
+            )
+            for i in range(S)
+        )
+        _write_parallel_results(out_dir, iterator, S)
+        return
+
+    if "spawn" not in mp.get_all_start_methods():
+        raise RuntimeError("--workers > 1 requires a multiprocessing spawn start method")
+
+    _set_single_thread_worker_env()
+    ctx = mp.get_context("spawn")
+    with tempfile.TemporaryDirectory(prefix="tea_summarize_arrays_") as tmp:
+        array_paths = _save_parallel_inputs(
+            Path(tmp),
+            z_full,
+            z_abbr,
+            z_syn_full,
+            z_syn_abbr,
+            syn_ok_full,
+            syn_ok_abbr,
+            z_rand_full,
+            z_rand_abbr,
+            rand_ok_full,
+            rand_ok_abbr,
+        )
+        with ctx.Pool(
+            processes=workers,
+            initializer=_init_spawn_worker,
+            initargs=(array_paths, species, bootstrap, ci),
+        ) as pool:
+            _write_parallel_results(
+                out_dir,
+                pool.imap(_compute_species_result_from_spawn_worker, range(S), chunksize=1),
+                S,
+            )
 
 
 def _compute_stats(
@@ -461,6 +1063,7 @@ def run_from_cache(
     seed: int,
     bootstrap: int,
     ci: float,
+    workers: int = 1,
 ):
     (
         z_full,
@@ -495,7 +1098,9 @@ def run_from_cache(
     for m in [m.lower() for m in methods]:
         out_dir = os.path.join(out_root, m)
         if m == "none":
-            _compute_stats(
+            compute = _compute_stats_parallel if workers != 1 else _compute_stats
+            kwargs = {"workers": workers} if workers != 1 else {}
+            compute(
                 z_full,
                 z_abbr,
                 z_sfull,
@@ -510,6 +1115,7 @@ def run_from_cache(
                 z_rand_abbr=z_rabbr,
                 rand_ok_full=rand_ok_full,
                 rand_ok_abbr=rand_ok_abbr,
+                **kwargs,
             )
         elif m in ("abtt", "whiten"):
             params = pp_fit(
@@ -535,7 +1141,9 @@ def run_from_cache(
                 t_rfull = None
                 t_rabbr = None
 
-            _compute_stats(
+            compute = _compute_stats_parallel if workers != 1 else _compute_stats
+            kwargs = {"workers": workers} if workers != 1 else {}
+            compute(
                 t_full,
                 t_abbr,
                 t_sfull,
@@ -550,6 +1158,7 @@ def run_from_cache(
                 z_rand_abbr=t_rabbr,
                 rand_ok_full=rand_ok_full,
                 rand_ok_abbr=rand_ok_abbr,
+                **kwargs,
             )
         else:
             raise SystemExit(f"Unknown method: {m}")
@@ -585,6 +1194,12 @@ def build_parser():
     p.add_argument("--pp-seed", type=int, default=0)
     p.add_argument("--bootstrap", type=int, default=2000)
     p.add_argument("--ci", type=float, default=0.95)
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of spawn worker processes for per-species summarization (default: 1).",
+    )
     return p
 
 
@@ -605,6 +1220,7 @@ def main():
         seed=a.pp_seed,
         bootstrap=a.bootstrap,
         ci=a.ci,
+        workers=a.workers,
     )
 
 

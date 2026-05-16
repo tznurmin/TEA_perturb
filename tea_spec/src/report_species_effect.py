@@ -1,9 +1,65 @@
+# Copyright 2026 tznurmin
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import argparse
 import csv
+import re
 from pathlib import Path
 from typing import Dict, Tuple
+
+from io_utils import slugify_model_id
+
+
+def _model_to_dirname(model_id: str) -> str:
+    return slugify_model_id(model_id)
+
+
+def _resolve_summaries_root(workdir: Path, model_id: str | None) -> Path:
+    """
+    Resolve the summaries root.
+
+    Supports both layouts:
+      - <workdir>/summaries_from_cache/seed<seed>/<method>/minimal_summary.csv
+      - <workdir>/summaries_from_cache/models/<model_dir>/seed<seed>/<method>/minimal_summary.csv
+
+    If --model is not provided and the legacy layout is not present, the function auto-selects a single model directory if one exists.
+
+    """
+
+    base = workdir / "summaries_from_cache"
+    if model_id and model_id.strip():
+        return base / "models" / _model_to_dirname(model_id)
+
+    # Prefer legacy layout if present.
+    if any(re.fullmatch(r"seed\d+", p.name) for p in base.glob("seed*") if p.is_dir()):
+        return base
+
+    models = base / "models"
+    if models.exists():
+        dirs = sorted([p for p in models.iterdir() if p.is_dir()])
+        if len(dirs) == 1:
+            return dirs[0]
+        if len(dirs) > 1:
+            names = ", ".join(p.name for p in dirs)
+            raise SystemExit(
+                "Multiple model result folders found under work/summaries_from_cache/models. "
+                "Pass --model to select one. Available: " + names
+            )
+
+    return base
 
 
 def _cond(baseline: str, abbrev: bool) -> str:
@@ -48,6 +104,14 @@ def _fmt(x: float) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--workdir", default="work")
+    ap.add_argument(
+        "--model",
+        default="",
+        help=(
+            "Model id used for the run (selects the matching model-slug directory under work/summaries_from_cache/models). "
+            "If omitted, the script uses the legacy layout if present, or auto-selects a single model dir."
+        ),
+    )
     ap.add_argument("--species", required=True)
     ap.add_argument("--seeds", default="")
     ap.add_argument("--methods", default="none,abtt,whiten")
@@ -62,14 +126,17 @@ def main() -> None:
     baselines = [b.strip() for b in args.baselines.split(",") if b.strip()]
     metric = args.metric
 
+    summaries_root = _resolve_summaries_root(workdir, args.model)
+
     print(f"SPECIES: {species}")
     print(f"WORKDIR: {workdir}")
     print(f"SEEDS: {','.join(map(str, seeds))}")
     print(f"METHODS: {','.join(methods)}")
     print(f"BASELINES: {','.join(baselines)}")
+    print(f"SUMMARIES_ROOT: {summaries_root}")
     print()
 
-    base = workdir / "summaries_from_cache"
+    base = summaries_root
 
     for baseline in baselines:
         print(f"BASELINE: {baseline}")

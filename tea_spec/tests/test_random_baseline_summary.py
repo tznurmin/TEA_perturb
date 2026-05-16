@@ -1,3 +1,17 @@
+# Copyright 2026 tznurmin
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import csv
@@ -6,6 +20,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 THIS_DIR = Path(__file__).resolve().parent
 SRC_DIR = THIS_DIR.parent / "src"
@@ -63,9 +78,7 @@ def _write_fake_cache(npz_path: Path) -> None:
     )
 
 
-def test_random_baseline_smoke(tmp_path: Path) -> None:
-    # end-to-end smoke: cache -> summarize (none) -> parse with compare_runs
-
+def test_random_baseline_rows_are_summarized_and_comparable(tmp_path: Path) -> None:
     npz = tmp_path / "fake_cache.npz"
     _write_fake_cache(npz)
 
@@ -107,3 +120,26 @@ def test_random_baseline_smoke(tmp_path: Path) -> None:
     )
     agg = r.aggregate()
     assert "n_full" in agg and agg["n_full"] > 0
+
+
+def test_compare_runs_rejects_missing_requested_baseline(tmp_path: Path) -> None:
+    run_dir = tmp_path / "none"
+    run_dir.mkdir()
+    (run_dir / "minimal_summary.csv").write_text(
+        "\n".join(
+            [
+                "condition,stat,anchor,mean,ci_lo,ci_hi",
+                "synonym_full,one_minus_cos,Staphylococcus aureus,0.1,0.09,0.11",
+                "species_full_delta_vs_syn,one_minus_cos,Staphylococcus aureus,0.2,0.19,0.21",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    run = compare_runs.RunData(
+        "none", str(run_dir), metric="one_minus_cos", baseline="random"
+    )
+
+    with pytest.raises(SystemExit, match="No usable 'random' baseline"):
+        compare_runs._validate_runs_have_baseline([run], "random")

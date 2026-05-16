@@ -1,7 +1,6 @@
 accelerate==1.7.0
 datasets==3.6.0
 evaluate==0.4.5
-icecream==2.1.4
 matplotlib==3.10.3
 nltk==3.9.1
 numpy==2.3.1

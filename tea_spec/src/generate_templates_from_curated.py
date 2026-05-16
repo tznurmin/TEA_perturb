@@ -1,3 +1,17 @@
+# Copyright 2026 tznurmin
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 Generate template sentences from curated TEA-style datasets.
 
@@ -31,8 +45,6 @@ import re
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-from nltk.tokenize.punkt import PunktParameters, PunktSentenceTokenizer
-
 from utils import abbreviate_binomial
 
 _CIT_PAT = re.compile(r"\[\s*(?:\d+(?:\s*[-\u2013]\s*\d+)?(?:\s*,\s*\d+)*)\s*\]")
@@ -54,6 +66,8 @@ def clean_text_block(raw: str) -> str:
 
 
 def _punkt_tokenizer() -> PunktSentenceTokenizer:
+    from nltk.tokenize.punkt import PunktParameters, PunktSentenceTokenizer
+
     pp = PunktParameters()
     pp.abbrev_types = {
         "fig",
@@ -130,6 +144,23 @@ def build_species_sets(species_full: Sequence[str]) -> Tuple[set[str], set[str]]
     return full, abbr
 
 
+def _known_genera(full_set: set[str]) -> set[str]:
+    genera: set[str] = set()
+    for name in full_set:
+        parts = name.split()
+        if len(parts) == 2:
+            genera.add(parts[0])
+    return genera
+
+
+def _is_full_binomial(canon: str) -> bool:
+    return re.fullmatch(r"[A-Z][a-z]{2,}\s+[a-z]{2,}", canon) is not None
+
+
+def _is_abbreviated_binomial(canon: str) -> bool:
+    return re.fullmatch(r"[A-Z]\.\s*[a-z]{2,}", canon) is not None
+
+
 def find_species_mentions(
     text: str, full_set: set[str], abbr_set: set[str]
 ) -> List[SpeciesMention]:
@@ -164,7 +195,11 @@ def replace_span(text: str, span: Tuple[int, int], replacement: str) -> str:
 
 
 def has_other_species(
-    sent: str, anchor_full: str, full_set: set[str], abbr_set: set[str]
+    sent: str,
+    anchor_full: str,
+    full_set: set[str],
+    abbr_set: set[str],
+    guard_mode: str = "strict",
 ) -> bool:
     """
     Return True if the sentence contains any non-anchor species mention.
@@ -174,9 +209,16 @@ def has_other_species(
     1) Whitelist based detection using the provided species sets.
        This is the preferred path (low false positives).
 
-    2) Regex fallback: if the species whitelist is incomplete, reject any extra
-       binomial-looking mention (full or abbreviated) that is not the anchor.
+    2) Strict fallback: reject any extra full or abbreviated binomial-looking
+       mention. This is the release default and matches the reported results.
+
+       The optional known-genus fallback only rejects extra binomial-looking
+       mentions whose genus or abbreviated genus initial is seen in the species
+       list.
     """
+    if guard_mode not in {"strict", "known-genus"}:
+        raise ValueError(f"unknown template guard mode: {guard_mode}")
+
     anchor_abbr = abbreviate_binomial(anchor_full)
 
     # stage 1: known species mentions (whitelist-based)
@@ -185,12 +227,30 @@ def has_other_species(
         if m.canonical not in (anchor_full, anchor_abbr):
             return True
 
-    # stage 2: regex fallback for unknown-but-binomial-looking mentions
+    if guard_mode == "strict":
+        for m in _FULL_OR_ABBR_PAT.finditer(sent):
+            canon = _canonicalize_species(m.group(0))
+            if canon in (anchor_full, anchor_abbr):
+                continue
+            return True
+        return False
+
+    known_genera = _known_genera(full_set)
+    known_initials = {g[0] for g in known_genera if g}
+
+    # stage 2: regex fallback for unknown-but-plausible species mentions
     for m in _FULL_OR_ABBR_PAT.finditer(sent):
         canon = _canonicalize_species(m.group(0))
         if canon in (anchor_full, anchor_abbr):
             continue
-        return True
+        if _is_full_binomial(canon):
+            genus = canon.split()[0]
+            if genus in known_genera:
+                return True
+        elif _is_abbreviated_binomial(canon):
+            initial = canon[0]
+            if initial in known_initials:
+                return True
 
     return False
 
@@ -202,6 +262,7 @@ def exactly_one_anchor(
     abbr_set: set[str],
     min_tokens: int,
     max_tokens: int,
+    guard_mode: str = "strict",
 ) -> bool:
     anchor_abbr = abbreviate_binomial(anchor_full)
     n_anchor = sent.count(anchor_full) + sent.count(anchor_abbr)
@@ -209,7 +270,11 @@ def exactly_one_anchor(
         return False
 
     if has_other_species(
-        sent, anchor_full=anchor_full, full_set=full_set, abbr_set=abbr_set
+        sent,
+        anchor_full=anchor_full,
+        full_set=full_set,
+        abbr_set=abbr_set,
+        guard_mode=guard_mode,
     ):
         return False
 
@@ -230,6 +295,7 @@ def extract_templates_from_curated(
     sentence_split: bool = True,
     shuffle_examples: bool = False,
     rng: Optional[random.Random] = None,
+    guard_mode: str = "strict",
 ) -> Dict[str, List[str]]:
     # extract one template sentence per (crc, context) where possible
 
@@ -284,6 +350,7 @@ def extract_templates_from_curated(
                         abbr_set=abbr_set,
                         min_tokens=min_tokens,
                         max_tokens=max_tokens,
+                        guard_mode=guard_mode,
                     ):
                         out_list.append(sent)
                         got = True
@@ -363,6 +430,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         action="store_true",
         help="Shuffle per-crc examples before selection (makes output depend on --seed)",
     )
+    p.add_argument(
+        "--template-guard",
+        choices=("strict", "known-genus"),
+        default="strict",
+        help="Template species guard. strict matches the reported release results.",
+    )
     p.add_argument("--seed", type=int, default=0, help="Seed for --shuffle-examples")
 
     args = p.parse_args(argv)
@@ -391,6 +464,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         sentence_split=not args.no_sentence_split,
         shuffle_examples=args.shuffle_examples,
         rng=rng,
+        guard_mode=args.template_guard,
     )
 
     flat = make_flat(grouped)

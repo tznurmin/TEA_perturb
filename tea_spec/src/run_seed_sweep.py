@@ -1,10 +1,27 @@
+# Copyright 2026 tznurmin
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import argparse
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import List
+
+from io_utils import slugify_model_id
 
 
 def _parse_seeds(s: str) -> List[int]:
@@ -15,6 +32,30 @@ def _parse_seeds(s: str) -> List[int]:
             continue
         out.append(int(part))
     return out
+
+
+def _parse_methods(s: str) -> List[str]:
+    return [part.strip() for part in s.split(",") if part.strip()]
+
+
+def _compare_run_entries(out_summaries: Path, methods: List[str]) -> List[str]:
+    entries: List[str] = []
+    for method in methods:
+        label = "white" if method == "whiten" else method
+        entries.append(f"{label}={out_summaries / method}")
+    return entries
+
+
+def _selected_baselines(compare_baselines: str, no_rand: bool) -> List[str]:
+    if no_rand:
+        if compare_baselines == "random":
+            raise SystemExit("--compare-baselines random is incompatible with --no-rand")
+        return ["synonym"]
+
+    if compare_baselines == "both":
+        return ["synonym", "random"]
+
+    return [compare_baselines]
 
 
 def _limited_env() -> dict:
@@ -107,8 +148,12 @@ def build_parser():
 def main():
     args = build_parser().parse_args()
     workdir = Path(args.workdir)
+    py = sys.executable
+
+    model_slug = slugify_model_id(args.model)
 
     seeds = _parse_seeds(args.seeds)
+    methods = _parse_methods(args.methods)
 
     dataset = args.dataset or str(
         workdir / "templates" / "cluster_all_examples_flat_42.json"
@@ -126,12 +171,27 @@ def main():
     env = _limited_env()
 
     for seed in seeds:
-        out_npz = workdir / "cache" / f"species_embeddings_seed{seed}.npz"
-        out_summaries = workdir / "summaries_from_cache" / f"seed{seed}"
+        out_npz = (
+            workdir
+            / "cache"
+            / "models"
+            / model_slug
+            / f"species_embeddings_seed{seed}.npz"
+        )
+        out_summaries = (
+            workdir
+            / "summaries_from_cache"
+            / "models"
+            / model_slug
+            / f"seed{seed}"
+        )
+
+        out_npz.parent.mkdir(parents=True, exist_ok=True)
+        out_summaries.mkdir(parents=True, exist_ok=True)
 
         # 1: cache embeddings
         cmd_embed = [
-            "python",
+            py,
             str(Path(__file__).with_name("embed_cache.py")),
             "--workdir",
             str(workdir),
@@ -169,7 +229,7 @@ def main():
 
         # 2: summarize
         cmd_sum = [
-            "python",
+            py,
             str(Path(__file__).with_name("summarize_from_cache.py")),
             "--workdir",
             str(workdir),
@@ -191,21 +251,13 @@ def main():
         _run(cmd_sum, env=env)
 
         # 3: compare within this seed
-        runs = [
-            f"none={out_summaries / 'none'}",
-            f"abtt={out_summaries / 'abtt'}",
-            f"white={out_summaries / 'whiten'}",
-        ]
+        runs = _compare_run_entries(out_summaries, methods)
 
-        baselines: List[str]
-        if args.compare_baselines == "both":
-            baselines = ["synonym", "random"]
-        else:
-            baselines = [args.compare_baselines]
+        baselines = _selected_baselines(args.compare_baselines, args.no_rand)
 
         for baseline in baselines:
             cmd_cmp = [
-                "python",
+                py,
                 str(Path(__file__).with_name("compare_runs.py")),
                 "--workdir",
                 str(workdir),

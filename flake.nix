@@ -35,7 +35,6 @@
           nltk
           wordfreq
           pytest
-          icecream
         ]);
 
       in {

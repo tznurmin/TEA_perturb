@@ -1,3 +1,17 @@
+# Copyright 2026 tznurmin
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import argparse
@@ -231,6 +245,22 @@ def compare_runs(runs: List[RunData]) -> Dict[str, Dict[str, float]]:
                 "spearman_abbrev_delta": _spearman(a_abbr, b_abbr),
             }
     return out
+
+
+def _validate_runs_have_baseline(runs: List[RunData], baseline: str) -> None:
+    empty = []
+    for r in runs:
+        n_full = len(_finite(list(r.full_delta.values())))
+        n_abbr = len(_finite(list(r.abbr_delta.values())))
+        if n_full == 0 and n_abbr == 0:
+            empty.append(r.name)
+
+    if empty:
+        names = ", ".join(empty)
+        raise SystemExit(
+            f"No usable {baseline!r} baseline delta rows found for run(s): {names}. "
+            "Check that the cache was built with the requested baseline enabled."
+        )
 
 
 def robust_species(
@@ -551,7 +581,7 @@ def build_parser():
         "--penalty-min",
         type=float,
         default=0.10,
-        help="Min ABBREV penalty fraction vs FULL (e.g., 0.10=10%)",
+        help="Min ABBREV penalty fraction vs FULL (e.g., 0.10=10%%)",
     )
     p.add_argument(
         "--sensitivity-topn",
@@ -590,12 +620,14 @@ def main():
             raise SystemExit(f"Not a directory: {path}")
         run_specs.append((name, path))
 
-    os.makedirs(args.out, exist_ok=True)
-
     runs: List[RunData] = [
         RunData(name, path, metric=args.metric, baseline=args.baseline)
         for (name, path) in run_specs
     ]
+    _validate_runs_have_baseline(runs, args.baseline)
+
+    os.makedirs(args.out, exist_ok=True)
+
     species = sorted(set().union(*[set(r.full_delta.keys()) for r in runs]))
 
     # per-species CSV (all rows)

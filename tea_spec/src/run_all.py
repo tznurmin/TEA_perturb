@@ -1,8 +1,23 @@
+# Copyright 2026 tznurmin
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import argparse
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import List
 
@@ -63,10 +78,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-species", type=int, default=5000)
     p.add_argument("--pp-max-fit-rows", type=int, default=200_000)
     p.add_argument(
+        "--force-build",
+        action="store_true",
+        help="Rebuild derived input files even when existing outputs are present.",
+    )
+    p.add_argument(
         "--no-rand", action="store_true", help="Disable wordfreq random baseline"
     )
 
-    # workspace bootstrap
+    # workdir bootstrap
     p.add_argument(
         "--skip-download",
         action="store_true",
@@ -78,6 +98,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override TEA_curated_data tarball URL used by setup_workdir.py",
     )
+    p.add_argument(
+        "--tea-sha256",
+        type=str,
+        default=None,
+        help="Expected SHA-256 checksum for the TEA_curated_data tarball.",
+    )
 
     return p
 
@@ -86,10 +112,11 @@ def main() -> None:
     a = build_parser().parse_args()
     workdir = Path(a.workdir)
     env = _limited_env()
+    py = sys.executable
 
     # bootstrap workdir and curated data: downloads TEA_curated_data v1.1 if missing
     cmd_setup = [
-        "python",
+        py,
         str(Path(__file__).with_name("setup_workdir.py")),
         "--workdir",
         str(workdir),
@@ -98,6 +125,8 @@ def main() -> None:
         cmd_setup.append("--skip-download")
     if a.tea_url:
         cmd_setup.extend(["--tea-url", str(a.tea_url)])
+    if a.tea_sha256:
+        cmd_setup.extend(["--tea-sha256", str(a.tea_sha256)])
     _run(cmd_setup, env=env)
 
     curated_root = workdir / "TEA_curated_data"
@@ -113,10 +142,10 @@ def main() -> None:
     species_in_corpus = workdir / "species" / "species_in_corpus.txt"
 
     # 1: species list
-    if not species_all.exists():
+    if a.force_build or not species_all.exists():
         _run(
             [
-                "python",
+                py,
                 str(Path(__file__).with_name("build_species_list.py")),
                 "--speclist",
                 str(Path(a.speclist)),
@@ -127,10 +156,10 @@ def main() -> None:
         )
 
     # 2: regular dataset
-    if not regular.exists():
+    if a.force_build or not regular.exists():
         _run(
             [
-                "python",
+                py,
                 str(Path(__file__).with_name("build_regular_dataset.py")),
                 "--curated-root",
                 str(curated_root),
@@ -143,10 +172,10 @@ def main() -> None:
         )
 
     # 3: templates
-    if not templates_flat.exists():
+    if a.force_build or not templates_flat.exists():
         _run(
             [
-                "python",
+                py,
                 str(Path(__file__).with_name("generate_templates_from_curated.py")),
                 "--workdir",
                 str(workdir),
@@ -165,10 +194,10 @@ def main() -> None:
         )
 
     # 4: species-in-corpus
-    if not species_in_corpus.exists():
+    if a.force_build or not species_in_corpus.exists():
         _run(
             [
-                "python",
+                py,
                 str(Path(__file__).with_name("extract_species_in_corpus.py")),
                 "--regular",
                 str(regular),
@@ -183,10 +212,12 @@ def main() -> None:
     # 5: seed sweep (embeddings, summaries, comparisons)
     seeds = ",".join(str(x) for x in _parse_seeds(a.seeds))
     cmd_seed_sweep = [
-        "python",
+        py,
         str(Path(__file__).with_name("run_seed_sweep.py")),
         "--workdir",
         str(workdir),
+        "--model",
+        str(a.model),
         "--dataset",
         str(templates_flat),
         "--species",
@@ -213,10 +244,12 @@ def main() -> None:
 
     # 6: seed stability report
     cmd_stability = [
-        "python",
+        py,
         str(Path(__file__).with_name("report_seed_stability.py")),
         "--workdir",
         str(workdir),
+        "--model",
+        str(a.model),
         "--seeds",
         seeds,
         "--methods",

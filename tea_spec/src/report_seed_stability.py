@@ -1,3 +1,17 @@
+# Copyright 2026 tznurmin
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # Report seed stability (signal vs noise)
 
 from __future__ import annotations
@@ -11,6 +25,8 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 from scipy.stats import spearmanr
+
+from io_utils import slugify_model_id
 
 
 def _read_csv(path: Path) -> List[dict]:
@@ -118,19 +134,35 @@ def collect_seed_method_deltas(
     methods: List[str],
     baseline: str,
     metric: str,
+    model_slug: str,
 ) -> List[SeedMethodDeltas]:
     out: List[SeedMethodDeltas] = []
     for seed in seeds:
         for method in methods:
-            p = (
+            # New layout: summaries_from_cache/models/<model_slug>/seed<seed>/<method>/minimal_summary.csv
+            p_new = (
+                workdir
+                / "summaries_from_cache"
+                / "models"
+                / model_slug
+                / f"seed{seed}"
+                / method
+                / "minimal_summary.csv"
+            )
+
+            # Backward-compatible layout: summaries_from_cache/seed<seed>/<method>/minimal_summary.csv
+            p_old = (
                 workdir
                 / "summaries_from_cache"
                 / f"seed{seed}"
                 / method
                 / "minimal_summary.csv"
             )
+
+            p = p_new if p_new.exists() else p_old
             if not p.exists():
-                raise FileNotFoundError(str(p))
+                # show the expected new path to aid debugging
+                raise FileNotFoundError(str(p_new))
             full, abbr = load_deltas(p, baseline=baseline, metric=metric)
             out.append(
                 SeedMethodDeltas(
@@ -456,6 +488,12 @@ def main() -> None:
         "--seeds", type=str, required=True, help="Comma-separated seeds, e.g. 42,43,44"
     )
     ap.add_argument(
+        "--model",
+        type=str,
+        default="dmis-lab/biobert-base-cased-v1.2",
+        help="Model id used to namespace results (default: dmis-lab/biobert-base-cased-v1.2)",
+    )
+    ap.add_argument(
         "--methods",
         type=str,
         default="none,abtt,whiten",
@@ -482,6 +520,7 @@ def main() -> None:
     a = ap.parse_args()
 
     workdir = Path(a.workdir)
+    model_slug = slugify_model_id(a.model)
     seeds = [int(x.strip()) for x in a.seeds.split(",") if x.strip()]
     methods = [x.strip() for x in a.methods.split(",") if x.strip()]
 
@@ -496,6 +535,7 @@ def main() -> None:
             methods=methods,
             baseline=baseline,
             metric=a.metric,
+            model_slug=model_slug,
         )
         rows = compute_stability(
             deltas=deltas,
@@ -512,7 +552,9 @@ def main() -> None:
         else:
             out_csv = (
                 workdir
-                / "summaries_from_cache"
+                / "reports"
+                / "models"
+                / model_slug
                 / f"seed_stability_{baseline}_{a.metric}.csv"
             )
         if a.out_md:
@@ -520,7 +562,9 @@ def main() -> None:
         else:
             out_md = (
                 workdir
-                / "summaries_from_cache"
+                / "reports"
+                / "models"
+                / model_slug
                 / f"seed_stability_{baseline}_{a.metric}.md"
             )
 

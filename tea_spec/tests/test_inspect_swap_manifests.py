@@ -21,23 +21,16 @@ THIS_DIR = Path(__file__).resolve().parent
 SRC_DIR = THIS_DIR.parent / "src"
 sys.path.insert(0, str(SRC_DIR))
 
-import build_regular_dataset  # noqa: E402
+from inspect_swap_manifests import _iter_manifest_paths  # noqa: E402
 
 
-def test_tokenize_words_strips_tea_italics_markers() -> None:
-    text = "Similarly, unique profiles of $i$Arabidopsis lyrata$/i$ ssp."
-    words = build_regular_dataset._tokenize_words(text)
+def test_manifest_discovery_searches_model_scoped_cache(tmp_path: Path) -> None:
+    root = tmp_path / "work" / "cache"
+    model_dir = root / "models" / "dmis-lab_biobert-base-cased-v1_2"
+    model_dir.mkdir(parents=True)
+    syn = model_dir / "species_embeddings_seed42.synswap.jsonl"
+    rnd = model_dir / "species_embeddings_seed42.randswap.jsonl"
+    syn.write_text("{}\n", encoding="utf-8")
+    rnd.write_text("{}\n", encoding="utf-8")
 
-    assert "Arabidopsis" in words
-    assert "lyrata" in words
-
-    # no token should include the markup markers
-    assert all("$i$" not in w for w in words)
-    assert all("$/i$" not in w for w in words)
-
-
-def test_tokenize_words_drops_standalone_markup_tokens() -> None:
-    text = "a $i$ Arabidopsis $/i$ b"
-    words = build_regular_dataset._tokenize_words(text)
-
-    assert words == ["a", "Arabidopsis", "b"]
+    assert _iter_manifest_paths(root) == [syn, rnd]

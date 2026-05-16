@@ -5,6 +5,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 work/
+work
 .hf_cache/
 .cache/
 .DS_Store
+._*
+*.tar.gz
